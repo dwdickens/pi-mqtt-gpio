@@ -38,6 +38,8 @@ SENSOR_INPUT_CONFIGS = {}  # storage for sensor input configs
 LAST_STATES = {}
 SET_TOPIC = "set"
 SET_ON_MS_TOPIC = "set_on_ms"
+SET_ON_MIN_TOPIC = "set_on_min"
+SET_OFF_MIN_TOPIC = "set_off_min"
 SET_OFF_MS_TOPIC = "set_off_ms"
 OUTPUT_TOPIC = "output"
 INPUT_TOPIC = "input"
@@ -195,6 +197,34 @@ def handle_set_ms(msg, value):
         ms,
     )
 
+def handle_set_min(msg, value):
+    """
+    Handles an incoming 'set_<on/off>_min' MQTT message.
+    :param msg: The incoming MQTT message
+    :type msg: paho.mqtt.client.MQTTMessage
+    :param value: The value to set the output to
+    :type value: bool
+    :return: None
+    :rtype: NoneType
+    """
+    try:
+        mint = int(msg.payload)
+    except ValueError:
+        raise InvalidPayload("Could not parse min value %r to an integer." % msg.payload)
+    suffix = SET_ON_MIN_TOPIC if value else SET_OFF_MIN_TOPIC
+    output_name = output_name_from_topic(msg.topic, topic_prefix, suffix)
+    output_config = output_by_name(output_name)
+    if output_config is None:
+        return
+
+    set_pin(output_config, value)
+    scheduler.add_task(Task(time() + (mint*1000.0*60.0) / 1000.0, set_pin, output_config, not value))
+    _LOG.info(
+        "Scheduled output %r to change back to %r after %r min.",
+        output_config["name"],
+        not value,
+        mint,
+    )
 
 def install_missing_requirements(module):
     """
@@ -303,6 +333,13 @@ def init_mqtt(config, digital_outputs):
         client.tls_set(**tls_kwargs)
         client.tls_insecure_set(tls_config["insecure"])
 
+    def on_disconnect(client, userdata, rc):
+        if rc != 0:
+            print("Unexpected disconnection.")
+            
+        for out_conf in digital_outputs:
+            initialise_digital_output(out_conf, GPIO_MODULES[out_conf["module"]])
+
     def on_conn(client, userdata, flags, rc):
         """
         On connection to MQTT, subscribe to the relevant topics.
@@ -318,10 +355,10 @@ def init_mqtt(config, digital_outputs):
         """
         if rc == 0:
             _LOG.info(
-                "Connected to the MQTT broker with protocol v%s.", config["protocol"]
+                "Hello Haines St!! Connected to the MQTT broker with protocol v%s.", config["protocol"]
             )
             for out_conf in digital_outputs:
-                for suffix in (SET_TOPIC, SET_ON_MS_TOPIC, SET_OFF_MS_TOPIC):
+                for suffix in (SET_TOPIC, SET_ON_MS_TOPIC, SET_OFF_MS_TOPIC, SET_ON_MIN_TOPIC, SET_OFF_MIN_TOPIC):
                     topic = "%s/%s/%s/%s" % (
                         topic_prefix,
                         OUTPUT_TOPIC,
@@ -369,6 +406,10 @@ def init_mqtt(config, digital_outputs):
                 handle_set_ms(msg, True)
             elif msg.topic.endswith("/%s" % SET_OFF_MS_TOPIC):
                 handle_set_ms(msg, False)
+            elif msg.topic.endswith("/%s" % SET_ON_MIN_TOPIC):
+                handle_set_min(msg, True)
+            elif msg.topic.endswith("/%s" % SET_OFF_MIN_TOPIC):
+                handle_set_min(msg, False)
             else:
                 _LOG.warning("Unhandled topic %r.", msg.topic)
         except InvalidPayload as exc:
@@ -379,6 +420,7 @@ def init_mqtt(config, digital_outputs):
     client.on_connect = on_conn
     client.on_message = on_msg
     client.on_log = on_log
+    client.on_disconnect = on_disconnect
 
     return client
 
@@ -453,6 +495,12 @@ def initialise_digital_output(out_conf, gpio):
     :return: None
     :rtype: NoneType
     """
+    
+    _LOG.info(
+    "Init dig output: %s",
+    out_conf
+    )
+        
     gpio.setup_pin(out_conf["pin"], PinDirection.OUTPUT, None, out_conf)
 
 
